@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+notebooks/raw_complaints.csv
+
+# Notebooks and editor junk
+.ipynb_checkpoints/
+*.log
+
+# Data folders to ignore
+data/Raw_data/
+data/Processed_data/
+vector_store/
+
+
+# Environment
+.env
