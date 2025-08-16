@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
+import html
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -22,229 +23,165 @@ SUPPORTED_PRODUCTS = [
     "Money transfer"
 ]
 
-def load_config(config_path: str = "config.json") -> Dict:
-    """Load configuration from JSON file"""
-    try:
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        logger.warning(f"Config file not found at {config_path}, using defaults")
-        return {}
-    except json.JSONDecodeError:
-        logger.error(f"Invalid JSON in config file at {config_path}")
-        return {}
-
 def clean_response_text(text: str) -> str:
-    """Clean and format the response text from the LLM"""
+    """Enhanced response cleaning with more patterns"""
     if not text:
         return ""
     
-    # Remove any incomplete sentences at the end
+    # Remove everything after common cutoff phrases
+    cutoff_phrases = [
+        "I am an AI",
+        "as a language model",
+        "Note:",
+        "Disclaimer:",
+        "However, please note",
+        "Keep in mind that"
+    ]
+    for phrase in cutoff_phrases:
+        if phrase.lower() in text.lower():
+            text = text[:text.lower().find(phrase.lower())]
+    
+    # Remove incomplete sentences at end
     text = re.sub(r'[^.!?]*$', '', text.strip())
     
-    # Remove common LLM boilerplate phrases
-    patterns_to_remove = [
-        r'^As an AI(?: language)? model,?',
-        r'^I(?: am an AI that| do not| can\'t)',
-        r'^(?:Based on|According to) the (?:provided|given) context',
-        r'^I don\'t have (?:access|enough information)',
-    ]
+    # Remove multiple newlines and spaces
+    text = re.sub(r'\n+', '\n', text)
+    text = re.sub(r' +', ' ', text)
     
-    for pattern in patterns_to_remove:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    # Remove markdown formatting if present
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # bold
+    text = re.sub(r'\*(.*?)\*', r'\1', text)      # italics
     
-    # Capitalize first letter and ensure proper punctuation
-    text = text.strip()
-    if text and not text.endswith(('.', '!', '?')):
-        text += '.'
+    # Fix common formatting issues
+    text = text.replace(' .', '.').replace(' ,', ',')
+    
+    # Capitalize properly and ensure punctuation
     if text:
         text = text[0].upper() + text[1:]
+        if not text.endswith(('.', '!', '?')):
+            text += '.'
     
     return text
 
-def validate_product_filter(product: str) -> bool:
-    """Validate if the product filter is one of our supported products"""
-    return product.lower() in [p.lower() for p in SUPPORTED_PRODUCTS]
-
-def get_available_products(data_dir: str = "data") -> List[str]:
+def format_context_sources(context_chunks: List[Dict], max_length: int = 250) -> str:
     """
-    Get list of available products from data directory
-    
-    Args:
-        data_dir: Directory containing complaint data files
-    
-    Returns:
-        List of available product names
-    """
-    # First check our standard supported products
-    available = set(SUPPORTED_PRODUCTS)
-    
-    # Then scan data files for additional products
-    try:
-        for file in Path(data_dir).glob("*.csv"):
-            try:
-                df = pd.read_csv(file, nrows=1)  # Just read header
-                if 'Product' in df.columns:
-                    available.update(df['Product'].unique())
-            except Exception as e:
-                logger.warning(f"Could not read {file}: {e}")
-    except FileNotFoundError:
-        logger.warning(f"Data directory {data_dir} not found")
-    
-    return sorted(available)
-
-def format_context_sources(context_chunks: List[Dict], max_length: int = 200) -> str:
-    """
-    Format retrieved context chunks for display in UI with source information
-    
-    Args:
-        context_chunks: List of dicts with 'text', 'product', 'score', 'id'
-        max_length: Maximum length of each chunk to display
-    
-    Returns:
-        Formatted string with sources
+    Enhanced source formatting with HTML for better display
     """
     if not context_chunks:
-        return "No sources found"
+        return "<p>No sources were used for this answer.</p>"
     
-    formatted = ["<b>Sources used in this answer:</b>"]
+    html_content = [
+        "<div style='font-family: Arial, sans-serif; margin-top: 10px;'>",
+        "<h4 style='margin-bottom: 5px;'>Sources used:</h4>",
+        "<div style='max-height: 300px; overflow-y: auto; padding: 5px; border: 1px solid #ddd; border-radius: 5px;'>"
+    ]
+    
     for i, chunk in enumerate(context_chunks, 1):
-        product = chunk.get('product', 'Unknown product')
+        product = html.escape(chunk.get('product', 'Unknown product'))
         score = chunk.get('score', 0)
         chunk_id = chunk.get('id', 'N/A')
-        text = chunk.get('text', '')[:max_length]
+        text = html.escape(chunk.get('text', '')[:max_length])
         
-        formatted.append(
-            f"\n<b>[{i}] {product} (ID: {chunk_id}, relevance: {score:.2f})</b>\n"
-            f"{text}{'...' if len(chunk.get('text', '')) > max_length else ''}"
+        html_content.append(
+            f"<div style='margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #eee;'>"
+            f"<b>Source {i}: {product} (ID: {chunk_id}, relevance: {score:.2f})</b><br>"
+            f"<div style='margin-left: 10px; margin-top: 5px; color: #555;'>{text}"
+            f"{'...' if len(chunk.get('text', '')) > max_length else ''}</div>"
+            f"</div>"
         )
     
-    return "\n".join(formatted)
+    html_content.extend(["</div>", "</div>"])
+    return "".join(html_content)
+
+def validate_product_filter(product: str) -> bool:
+    """Case-insensitive product validation"""
+    return product.lower() in [p.lower() for p in SUPPORTED_PRODUCTS]
 
 def parse_date_range(date_str: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Parse date range string into start and end dates
-    
-    Args:
-        date_str: String in format "YYYY-MM-DD to YYYY-MM-DD" or "last N days"
-    
-    Returns:
-        Tuple of (start_date, end_date) in YYYY-MM-DD format
-    """
+    """More robust date range parsing"""
     if not date_str:
         return None, None
     
     try:
-        if " to " in date_str:
-            start, end = date_str.split(" to ")
+        # Handle "last N days/weeks/months"
+        if date_str.lower().startswith('last '):
+            parts = date_str[5:].split()
+            num = int(parts[0])
+            unit = parts[1].lower() if len(parts) > 1 else 'days'
+            
+            end_date = datetime.now()
+            if 'day' in unit:
+                start_date = end_date - timedelta(days=num)
+            elif 'week' in unit:
+                start_date = end_date - timedelta(weeks=num)
+            elif 'month' in unit:
+                start_date = end_date - timedelta(days=num*30)
+            else:
+                start_date = end_date - timedelta(days=num)
+            
+            return start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
+        
+        # Handle explicit date ranges
+        if ' to ' in date_str:
+            start, end = date_str.split(' to ', 1)
             return start.strip(), end.strip()
-        elif date_str.startswith("last "):
-            days = int(date_str[5:].split()[0])
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-            return start_date, end_date
+        
+        # Handle single date
+        if re.match(r'\d{4}-\d{2}-\d{2}', date_str):
+            return date_str, date_str
+    
     except Exception as e:
         logger.warning(f"Failed to parse date range '{date_str}': {e}")
     
     return None, None
 
-def save_user_query_history(user_id: str, query: str, response: str, 
-                          storage_path: str = "user_history"):
+def analyze_query_intent(query: str) -> Dict:
     """
-    Save user query and response to history file
-    
-    Args:
-        user_id: Unique identifier for user
-        query: User's question
-        response: Generated answer
-        storage_path: Directory to store history files
-    """
-    try:
-        Path(storage_path).mkdir(exist_ok=True)
-        history_file = Path(storage_path) / f"{user_id}.jsonl"
-        
-        record = {
-            "timestamp": datetime.now().isoformat(),
-            "query": query,
-            "response": response
+    Basic query intent analysis
+    Returns:
+        {
+            "products": list of mentioned products,
+            "is_comparison": bool,
+            "time_period": optional time period,
+            "question_type": "trend", "specific", "general", etc.
         }
-        
-        with open(history_file, 'a') as f:
-            f.write(json.dumps(record) + "\n")
-    except Exception as e:
-        logger.error(f"Failed to save user history: {e}")
-
-def rate_limit_check(user_id: str, max_requests: int = 30, 
-                    window_minutes: int = 60) -> bool:
     """
-    Simple rate limiting check for a user
+    query_lower = query.lower()
+    result = {
+        "products": [],
+        "is_comparison": False,
+        "time_period": None,
+        "question_type": "general"
+    }
     
-    Args:
-        user_id: Unique identifier for user
-        max_requests: Maximum allowed requests in time window
-        window_minutes: Time window in minutes
+    # Detect products
+    for product in SUPPORTED_PRODUCTS:
+        if product.lower() in query_lower:
+            result["products"].append(product)
     
-    Returns:
-        True if request should be allowed, False if rate limited
-    """
-    # In production, you'd want to use Redis or similar for this
-    # This is a simplified in-memory version for demonstration
-    if not hasattr(rate_limit_check, "request_counts"):
-        rate_limit_check.request_counts = defaultdict(int)
-        rate_limit_check.last_reset = datetime.now()
+    # Detect comparisons
+    result["is_comparison"] = any(
+        word in query_lower for word in ['vs', 'versus', 'compared to', 'difference between']
+    )
     
-    # Reset counts if window has passed
-    if (datetime.now() - rate_limit_check.last_reset).seconds > window_minutes * 60:
-        rate_limit_check.request_counts.clear()
-        rate_limit_check.last_reset = datetime.now()
+    # Detect time periods
+    time_terms = {
+        'recent': 'last 30 days',
+        'last week': 'last 7 days',
+        'last month': 'last 30 days',
+        'this year': f'{datetime.now().year}-01-01 to {datetime.now().strftime("%Y-%m-%d")}'
+    }
+    for term, period in time_terms.items():
+        if term in query_lower:
+            result["time_period"] = period
+            break
     
-    # Increment count for this user
-    rate_limit_check.request_counts[user_id] += 1
+    # Detect question type
+    if any(word in query_lower for word in ['trend', 'increase', 'decrease', 'more common']):
+        result["question_type"] = "trend"
+    elif any(word in query_lower for word in ['specific', 'particular', 'example']):
+        result["question_type"] = "specific"
+    elif 'common' in query_lower:
+        result["question_type"] = "common_issues"
     
-    return rate_limit_check.request_counts[user_id] <= max_requests
-
-def load_user_history(user_id: str, storage_path: str = "user_history", 
-                     limit: int = 50) -> List[Dict]:
-    """
-    Load user's query history
-    
-    Args:
-        user_id: Unique identifier for user
-        storage_path: Directory where history files are stored
-        limit: Maximum number of history items to return
-    
-    Returns:
-        List of history records sorted by timestamp (newest first)
-    """
-    try:
-        history_file = Path(storage_path) / f"{user_id}.jsonl"
-        if not history_file.exists():
-            return []
-        
-        with open(history_file, 'r') as f:
-            lines = f.readlines()[-limit:]  # Get most recent entries
-            history = [json.loads(line) for line in lines if line.strip()]
-        
-        return sorted(history, key=lambda x: x['timestamp'], reverse=True)
-    except Exception as e:
-        logger.error(f"Failed to load user history: {e}")
-        return []
-
-if __name__ == "__main__":
-    # Test utility functions
-    print("=== Testing get_available_products() ===")
-    print("Available products:", get_available_products())
-    
-    print("\n=== Testing clean_response_text() ===")
-    test_text = "   as an AI model, I can't answer that. Based on the context, users are unhappy.   "
-    print(f"Before: '{test_text}'")
-    print(f"After: '{clean_response_text(test_text)}'")
-    
-    print("\n=== Testing format_context_sources() ===")
-    test_chunks = [
-        {"text": "Customers report issues with late fees on BNPL services", 
-         "product": "BNPL", "score": 0.92, "id": "123"},
-        {"text": "Some users can't access their payment history", 
-         "product": "Credit Card", "score": 0.87, "id": "456"}
-    ]
-    print(format_context_sources(test_chunks))
+    return result
