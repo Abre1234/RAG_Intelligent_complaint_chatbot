@@ -1,4 +1,4 @@
-# tests/rag_test_pipeline.py
+# rag_test_pipeline.py 
 import pytest
 from src.rag_pipeline import generate_answer
 from src.retriever import ComplaintRetriever, retrieve_context
