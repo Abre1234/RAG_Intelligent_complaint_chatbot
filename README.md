@@ -10,10 +10,6 @@ It uses **LangChain**, **FAISS**, and **OpenAI embeddings** to retrieve relevant
 - Retrieval-based Q&A
 - Interactive interface with Gradio  
 
-## 📂 Project Structure
-- `ingest.py` → Load and chunk documents  
-- `store.py` → Generate embeddings & store in FAISS  
-- `app.py` → Gradio chatbot interface  
 
 ## 🔧 Installation
 ```bash
